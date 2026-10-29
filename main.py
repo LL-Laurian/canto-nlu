@@ -255,11 +255,20 @@ class CantoFineTuningBase:
     """Lightweight base for fine-tuning tasks: only needs a tokenizer and the base model
     directory, unlike CantoPreTrainer, which also requires the Cantonese Wikipedia corpus."""
 
+    # Per-task defaults; run.py overrides them only when --lr/--warmup_ratio/--weight_decay are given
+    learning_rate = 2e-5
+    warmup_ratio = 0.0
+    weight_decay = 0.0
+
     def __init__(self, lang="yue", model_dir="./models/yue-monolingual", per_device_batch_size=64, seed=42,
-                 gradient_accumulation_steps=1):
+                 gradient_accumulation_steps=1, learning_rate=None, warmup_ratio=None, weight_decay=None):
         self.lang = lang
         self.model_dir = model_dir
         self.seed = seed
+        for name, value in (("learning_rate", learning_rate), ("warmup_ratio", warmup_ratio),
+                            ("weight_decay", weight_decay)):
+            if value is not None:
+                setattr(self, name, value)
         # Default suits base-sized encoders; lower it for large models (e.g. 16 for ModernBERT-large)
         self.per_device_batch_size = per_device_batch_size
         # Raise together with lowering per_device_batch_size to keep the effective batch size
@@ -288,8 +297,8 @@ class CantoSequenceClassificationFineTuner(CantoFineTuningBase):
     max_length = 128
 
     def __init__(self, lang="yue", model_dir="./models/yue-monolingual", eval_only=False, per_device_batch_size=64,
-                 seed=42, gradient_accumulation_steps=1, num_train_epochs=None):
-        super().__init__(lang, model_dir, per_device_batch_size, seed, gradient_accumulation_steps)
+                 seed=42, gradient_accumulation_steps=1, num_train_epochs=None, **kwargs):
+        super().__init__(lang, model_dir, per_device_batch_size, seed, gradient_accumulation_steps, **kwargs)
         if num_train_epochs is not None:
             self.num_train_epochs = num_train_epochs
         self.label2id = {v: k for k, v in self.id2label.items()}
@@ -310,6 +319,8 @@ class CantoSequenceClassificationFineTuner(CantoFineTuningBase):
             num_train_epochs=self.num_train_epochs,
             optim="adamw_torch",
             learning_rate=self.learning_rate,
+            warmup_ratio=self.warmup_ratio,
+            weight_decay=self.weight_decay,
             per_device_train_batch_size=self.per_device_batch_size,
             per_device_eval_batch_size=self.per_device_batch_size,
             gradient_accumulation_steps=self.gradient_accumulation_steps,
@@ -439,8 +450,8 @@ class CantoLAJFineTuner(CantoSequenceClassificationFineTuner):
 
 
 class CantoPOSFineTuner(CantoFineTuningBase):
-    def __init__(self, lang, model_dir, per_device_batch_size=64, seed=42, gradient_accumulation_steps=1):
-        super().__init__(lang, model_dir, per_device_batch_size, seed, gradient_accumulation_steps)
+    def __init__(self, lang, model_dir, per_device_batch_size=64, seed=42, gradient_accumulation_steps=1, **kwargs):
+        super().__init__(lang, model_dir, per_device_batch_size, seed, gradient_accumulation_steps, **kwargs)
         self.finetune_dataset = None
         # The 15 UPOS tags attested in UD_Cantonese-HK (SYM and X are unused):
         # https://universaldependencies.org/treebanks/yue_hk/index.html
@@ -511,7 +522,9 @@ class CantoPOSFineTuner(CantoFineTuningBase):
             output_dir=FINETUNE_OUTPUT_DIR,
             overwrite_output_dir=True,
             num_train_epochs=20,
-            learning_rate=2e-5,
+            learning_rate=self.learning_rate,
+            warmup_ratio=self.warmup_ratio,
+            weight_decay=self.weight_decay,
             per_device_train_batch_size=self.per_device_batch_size,
             per_device_eval_batch_size=self.per_device_batch_size,
             gradient_accumulation_steps=self.gradient_accumulation_steps,
@@ -661,11 +674,12 @@ class EncoderForDependencyParsing(nn.Module):
 
 
 class CantoDEPSFineTuner(CantoFineTuningBase):
-    encoder_learning_rate = 2e-5
+    # learning_rate (inherited, 2e-5) applies to the encoder; the parser keeps its own
     parser_learning_rate = 1e-3
+    warmup_ratio = 0.1
 
-    def __init__(self, lang, model_dir, per_device_batch_size=64, seed=42, gradient_accumulation_steps=1):
-        super().__init__(lang, model_dir, per_device_batch_size, seed, gradient_accumulation_steps)
+    def __init__(self, lang, model_dir, per_device_batch_size=64, seed=42, gradient_accumulation_steps=1, **kwargs):
+        super().__init__(lang, model_dir, per_device_batch_size, seed, gradient_accumulation_steps, **kwargs)
         self.finetune_dataset = None
         self.max_length = 128
 
@@ -810,8 +824,8 @@ class CantoDEPSFineTuner(CantoFineTuningBase):
             output_dir=FINETUNE_OUTPUT_DIR,
             overwrite_output_dir=True,
             num_train_epochs=30,
-            learning_rate=self.encoder_learning_rate,
-            warmup_ratio=0.1,
+            learning_rate=self.learning_rate,
+            warmup_ratio=self.warmup_ratio,
             per_device_train_batch_size=self.per_device_batch_size,
             per_device_eval_batch_size=self.per_device_batch_size,
             gradient_accumulation_steps=self.gradient_accumulation_steps,
@@ -828,9 +842,9 @@ class CantoDEPSFineTuner(CantoFineTuningBase):
         encoder_params = [p for n, p in model.named_parameters() if n.startswith("encoder.")]
         parser_params = [p for n, p in model.named_parameters() if not n.startswith("encoder.")]
         optimizer = torch.optim.AdamW([
-            {"params": encoder_params, "lr": self.encoder_learning_rate},
+            {"params": encoder_params, "lr": self.learning_rate},
             {"params": parser_params, "lr": self.parser_learning_rate},
-        ], weight_decay=0.0)  # Trainer's own default; torch's AdamW would otherwise use 0.01
+        ], weight_decay=self.weight_decay)  # Default 0.0 is Trainer's own; torch's AdamW would use 0.01
 
         def compute_deps_metrics(eval_pred):
             """

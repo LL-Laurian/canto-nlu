@@ -52,7 +52,9 @@ def run(args):
                 if issubclass(fine_tuner_cls, CantoSequenceClassificationFineTuner):
                     kwargs["num_train_epochs"] = args.epochs
                 model = fine_tuner_cls(args.lang, model_dir=args.model_dir, per_device_batch_size=args.batch_size,
-                                       seed=args.seed, gradient_accumulation_steps=args.grad_acc, **kwargs)
+                                       seed=args.seed, gradient_accumulation_steps=args.grad_acc,
+                                       learning_rate=args.lr, warmup_ratio=args.warmup_ratio,
+                                       weight_decay=args.weight_decay, **kwargs)
                 model.finetune()
         else:
             print(f"{args.lang} fine-tuning is not supported. Please choose from: yue")
@@ -99,6 +101,13 @@ if __name__ == "__main__":
     parser.add_argument("--seed", type=int, default=42,
                         help="Random seed for model head initialization, data shuffling and dropout. "
                              "Run with several seeds to measure cross-seed variance.")
+    parser.add_argument("--lr", type=float, default=None,
+                        help="Peak learning rate (the encoder's, for deps; the deps parser keeps 1e-3). "
+                             "Defaults to 2e-5.")
+    parser.add_argument("--warmup_ratio", type=float, default=None,
+                        help="Share of training steps spent on linear warmup. Defaults to 0.1 for deps, else 0.")
+    parser.add_argument("--weight_decay", type=float, default=None,
+                        help="AdamW weight decay. Defaults to 0.")
     args = parser.parse_args()
 
     """
