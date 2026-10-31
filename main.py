@@ -315,11 +315,10 @@ class CantoSequenceClassificationFineTuner(CantoFineTuningBase):
 
         self.training_args = TrainingArguments(
             output_dir=FINETUNE_OUTPUT_DIR,
-            overwrite_output_dir=True,
             num_train_epochs=self.num_train_epochs,
             optim="adamw_torch",
             learning_rate=self.learning_rate,
-            warmup_ratio=self.warmup_ratio,
+            warmup_steps=self.warmup_ratio,  # a float below 1 is a ratio of total steps
             weight_decay=self.weight_decay,
             per_device_train_batch_size=self.per_device_batch_size,
             per_device_eval_batch_size=self.per_device_batch_size,
@@ -432,9 +431,9 @@ class CantoLangDetectFineTuner(CantoSequenceClassificationFineTuner):
     text_fields = ("sentence",)
     id2label = {0: "cantonese", 1: "mandarin", 2: "corrupted"}
     split_paths = {
-        "train": "data/ld/ld_train.jsonl",
-        "validation": "data/ld/ld_val.jsonl",
-        "test": "data/ld/ld_test.jsonl",
+        "train": "data/ld/lid_train.jsonl",
+        "validation": None,
+        "test": "data/ld/lid_test.jsonl",
     }
 
 
@@ -520,10 +519,9 @@ class CantoPOSFineTuner(CantoFineTuningBase):
 
         training_args = TrainingArguments(
             output_dir=FINETUNE_OUTPUT_DIR,
-            overwrite_output_dir=True,
             num_train_epochs=20,
             learning_rate=self.learning_rate,
-            warmup_ratio=self.warmup_ratio,
+            warmup_steps=self.warmup_ratio,  # a float below 1 is a ratio of total steps
             weight_decay=self.weight_decay,
             per_device_train_batch_size=self.per_device_batch_size,
             per_device_eval_batch_size=self.per_device_batch_size,
@@ -564,7 +562,7 @@ class CantoPOSFineTuner(CantoFineTuningBase):
             args=training_args,
             train_dataset=self.finetune_dataset["train"],
             eval_dataset=self.finetune_dataset["test"],
-            tokenizer=self.tokenizer,
+            processing_class=self.tokenizer,
             compute_metrics=pos_compute_metrics,
         )
 
@@ -822,10 +820,9 @@ class CantoDEPSFineTuner(CantoFineTuningBase):
 
         args = TrainingArguments(
             output_dir=FINETUNE_OUTPUT_DIR,
-            overwrite_output_dir=True,
             num_train_epochs=30,
             learning_rate=self.learning_rate,
-            warmup_ratio=self.warmup_ratio,
+            warmup_steps=self.warmup_ratio,  # a float below 1 is a ratio of total steps
             per_device_train_batch_size=self.per_device_batch_size,
             per_device_eval_batch_size=self.per_device_batch_size,
             gradient_accumulation_steps=self.gradient_accumulation_steps,
@@ -899,7 +896,7 @@ class CantoDEPSFineTuner(CantoFineTuningBase):
             args=args,
             train_dataset=self.finetune_dataset["train"],
             eval_dataset=self.finetune_dataset["test"],
-            tokenizer=self.tokenizer,
+            processing_class=self.tokenizer,
             compute_metrics=compute_deps_metrics,
             optimizers=(optimizer, None),
         )

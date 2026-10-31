@@ -1,6 +1,6 @@
 #!/bin/bash
 #SBATCH --job-name=cantonlu-finetune
-#SBATCH --account=CONFIRM_WITH_HYUN
+#SBATCH --account=rrg-annielee
 #SBATCH --gres=gpu:nvidia_h100_80gb_hbm3_3g.40gb:1
 #SBATCH --cpus-per-task=4
 #SBATCH --mem=32G
@@ -21,7 +21,7 @@ TASK=$2
 shift 2
 
 module load python/3.11 gcc arrow
-source ~/envs/cantonlu/bin/activate
+source ~/envs/cantonlu-v5/bin/activate
 
 # Models and data are on disk already: fail fast instead of reaching for the Hugging Face Hub
 export HF_HUB_OFFLINE=1
