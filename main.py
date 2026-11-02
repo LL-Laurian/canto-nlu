@@ -17,7 +17,7 @@ import os
 import tempfile
 import numpy as np
 from sklearn.metrics import accuracy_score, confusion_matrix, f1_score
-from sklearn.model_selection import train_test_split
+from sklearn.model_selection import KFold, train_test_split
 import evaluate
 from utils import get_subset
 import torch
@@ -251,6 +251,18 @@ def load_jsonl_splits(paths):
     return {split: load_dataset("json", data_files=str(path), split="train") for split, path in paths.items()}
 
 
+def cv_fold_splits(raw, cv_folds, fold):
+    """For hyperparameter selection: train on all but fold `fold` of `cv_folds` folds of the training
+    split and evaluate on that fold in place of the test split, which is then never scored. Folds are
+    fixed (random_state=42) whatever --seed is, so every configuration sees the same folds."""
+    folds = list(KFold(n_splits=cv_folds, shuffle=True, random_state=42).split(range(len(raw["train"]))))
+    train_idx, held_out_idx = folds[fold]
+    out = dict(raw, train=raw["train"].select(train_idx), test=raw["train"].select(held_out_idx))
+    if "validation" in out:
+        out["validation"] = None
+    return out
+
+
 class CantoFineTuningBase:
     """Lightweight base for fine-tuning tasks: only needs a tokenizer and the base model
     directory, unlike CantoPreTrainer, which also requires the Cantonese Wikipedia corpus."""
@@ -261,8 +273,11 @@ class CantoFineTuningBase:
     weight_decay = 0.0
 
     def __init__(self, lang="yue", model_dir="./models/yue-monolingual", per_device_batch_size=64, seed=42,
-                 gradient_accumulation_steps=1, learning_rate=None, warmup_ratio=None, weight_decay=None):
+                 gradient_accumulation_steps=1, learning_rate=None, warmup_ratio=None, weight_decay=None,
+                 cv_folds=None, fold=None):
         self.lang = lang
+        self.cv_folds = cv_folds
+        self.fold = fold
         self.model_dir = model_dir
         self.seed = seed
         for name, value in (("learning_rate", learning_rate), ("warmup_ratio", warmup_ratio),
@@ -281,6 +296,9 @@ class CantoFineTuningBase:
             )
         self.tokenizer = AutoTokenizer.from_pretrained(self.model_dir,
             trust_remote_code=True,)
+
+    def apply_cv(self, raw):
+        return raw if self.cv_folds is None else cv_fold_splits(raw, self.cv_folds, self.fold)
 
 
 class CantoSequenceClassificationFineTuner(CantoFineTuningBase):
@@ -351,7 +369,7 @@ class CantoSequenceClassificationFineTuner(CantoFineTuningBase):
         return example
 
     def preprocess_data(self, eval_only=False):
-        raw = self.load_raw_splits(eval_only=eval_only)
+        raw = self.apply_cv(self.load_raw_splits(eval_only=eval_only))
 
         def tokenize(examples):
             args = [examples[field] for field in self.text_fields]
@@ -461,10 +479,10 @@ class CantoPOSFineTuner(CantoFineTuningBase):
 
     def preprocess_data(self):
         # Expected format: {"train": [{"tokens": [...], "upos": [...]}], ...}
-        raw_data = load_jsonl_splits({
+        raw_data = self.apply_cv(load_jsonl_splits({
             "train": "data/pos/pos_train.jsonl",
             "test": "data/pos/pos_test.jsonl",
-        })
+        }))
 
         def align_labels_with_tokens(examples):
             tokenized = self.tokenizer(
@@ -712,10 +730,10 @@ class CantoDEPSFineTuner(CantoFineTuningBase):
           - map head word index -> tokenized sequence index of that head's FIRST subword
           - map ROOT (0) -> [CLS] position index (usually 0)
         """
-        raw = load_jsonl_splits({
+        raw = self.apply_cv(load_jsonl_splits({
             "train": "data/deps/deps_train.jsonl",
             "test": "data/deps/deps_test.jsonl",
-        })
+        }))
 
         def align(examples):
             # Tokenize with word alignment

@@ -54,7 +54,8 @@ def run(args):
                 model = fine_tuner_cls(args.lang, model_dir=args.model_dir, per_device_batch_size=args.batch_size,
                                        seed=args.seed, gradient_accumulation_steps=args.grad_acc,
                                        learning_rate=args.lr, warmup_ratio=args.warmup_ratio,
-                                       weight_decay=args.weight_decay, **kwargs)
+                                       weight_decay=args.weight_decay, cv_folds=args.cv_folds, fold=args.fold,
+                                       **kwargs)
                 model.finetune()
         else:
             print(f"{args.lang} fine-tuning is not supported. Please choose from: yue")
@@ -108,7 +109,14 @@ if __name__ == "__main__":
                         help="Share of training steps spent on linear warmup. Defaults to 0.1 for deps, else 0.")
     parser.add_argument("--weight_decay", type=float, default=None,
                         help="AdamW weight decay. Defaults to 0.")
+    parser.add_argument("--cv_folds", type=int, default=None,
+                        help="For hyperparameter selection: split the training data into this many folds, "
+                             "train on all but --fold and report scores on it instead of on the test set.")
+    parser.add_argument("--fold", type=int, default=None, help="Held-out fold, 0 to --cv_folds - 1.")
     args = parser.parse_args()
+    if (args.cv_folds is None) != (args.fold is None) or (args.cv_folds is not None
+                                                           and not 0 <= args.fold < args.cv_folds):
+        parser.error("--cv_folds and --fold go together, with 0 <= --fold < --cv_folds")
 
     """
     Add your custom arguments for IDE tests here
@@ -130,4 +138,7 @@ if __name__ == "__main__":
         args.epochs = 1 if modernbert else 3
 
     print(args)
+    if args.cv_folds is not None:
+        print(f"Cross-validation fold {args.fold}/{args.cv_folds}: 'test' scores below are on the held-out "
+              f"part of the training data; the test set is not used.")
     run(args)
