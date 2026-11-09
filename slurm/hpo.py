@@ -26,7 +26,7 @@ MODELS = {"mono": "models/yue-modernbert-monolingual", "chinese": "models/chines
           "transfer": "models/yue-modernbert-transfer"}
 # Selection metric (as printed on run.py's "Final ..." line) and Slurm time limit per task
 TASKS = {"ld": ("macro F1", "01:00:00"), "laj": ("macro F1", "01:00:00"), "pos": ("macro F1", "01:00:00"),
-         "deps": ("LAS", "02:00:00")}
+         "deps": ("LAS", "02:00:00"), "sentiment": ("macro F1", "01:00:00")}
 LEARNING_RATES = [2e-5, 5e-5, 1e-4, 2e-4, 3e-4, 5e-4, 8e-4]
 BASELINE_LR = 2e-5
 CV_FOLDS = 5
