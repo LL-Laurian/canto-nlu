@@ -433,6 +433,37 @@ class CantoNLIFineTuner(CantoSequenceClassificationFineTuner):
         }
 
 
+class CantoXNLIFineTuner(CantoNLIFineTuner):
+    """NLI trained on yue-all-nli as above, but scored on Cantonese translations of the XNLI dev and test
+    splits. XNLI is 3-way: neutral and contradiction both count as not_entailment."""
+    task_name = "xnli"
+    split_paths = {
+        "validation": "data/nli/xnli_yue/xnli_yue.dev.jsonl",
+        "test": "data/nli/xnli_yue/xnli_yue.test.jsonl",
+    }
+
+    def load_raw_splits(self, eval_only=False):
+        def to_binary(example):
+            return {"premise": example["yue_premise"], "hypothesis": example["yue_hypothesis"],
+                    "label": 0 if example["label"] == "entailment" else 1, "xnli_label": example["label"]}
+
+        raw = {split: ds.map(to_binary, remove_columns=ds.column_names)
+               for split, ds in load_jsonl_splits(self.split_paths).items()}
+        raw["train"] = None if eval_only else super().load_raw_splits()["train"]
+        return raw
+
+    def eval(self, trainer):
+        super().eval(trainer)
+        # Accuracy per original XNLI label, to show whether neutral (never seen in training) is the hard part
+        test = self.finetune_dataset["test"]
+        preds = trainer.predict(test).predictions
+        preds = (preds[0] if isinstance(preds, tuple) else preds).argmax(-1)
+        xnli_labels = np.array(test["xnli_label"])
+        for name in ("entailment", "neutral", "contradiction"):
+            gold = 0 if name == "entailment" else 1
+            print(f"Final xnli test accuracy on {name}: {np.mean(preds[xnli_labels == name] == gold)}")
+
+
 class CantoSentimentFineTuner(CantoSequenceClassificationFineTuner):
     task_name = "sentiment"
     text_fields = ("sentence",)

@@ -2,6 +2,7 @@ from main import (
     CantoPreTrainer,
     CantoSequenceClassificationFineTuner,
     CantoNLIFineTuner,
+    CantoXNLIFineTuner,
     CantoPOSFineTuner,
     CantoDEPSFineTuner,
     CantoSentimentFineTuner,
@@ -13,6 +14,7 @@ from transformers import AutoConfig, Trainer, set_seed
 
 FINETUNE_TASKS = {
     "nli": CantoNLIFineTuner,
+    "xnli": CantoXNLIFineTuner,
     "pos": CantoPOSFineTuner,
     "deps": CantoDEPSFineTuner,
     "sentiment": CantoSentimentFineTuner,
