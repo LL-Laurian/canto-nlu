@@ -2,6 +2,7 @@ from main import (
     CantoPreTrainer,
     CantoSequenceClassificationFineTuner,
     CantoNLIFineTuner,
+    CantoXNLIFineTuner,
     CantoPOSFineTuner,
     CantoDEPSFineTuner,
     CantoSentimentFineTuner,
@@ -13,6 +14,7 @@ from transformers import AutoConfig, Trainer, set_seed
 
 FINETUNE_TASKS = {
     "nli": CantoNLIFineTuner,
+    "xnli": CantoXNLIFineTuner,
     "pos": CantoPOSFineTuner,
     "deps": CantoDEPSFineTuner,
     "sentiment": CantoSentimentFineTuner,
@@ -52,7 +54,10 @@ def run(args):
                 if issubclass(fine_tuner_cls, CantoSequenceClassificationFineTuner):
                     kwargs["num_train_epochs"] = args.epochs
                 model = fine_tuner_cls(args.lang, model_dir=args.model_dir, per_device_batch_size=args.batch_size,
-                                       seed=args.seed, gradient_accumulation_steps=args.grad_acc, **kwargs)
+                                       seed=args.seed, gradient_accumulation_steps=args.grad_acc,
+                                       learning_rate=args.lr, warmup_ratio=args.warmup_ratio,
+                                       weight_decay=args.weight_decay, cv_folds=args.cv_folds, fold=args.fold,
+                                       **kwargs)
                 model.finetune()
         else:
             print(f"{args.lang} fine-tuning is not supported. Please choose from: yue")
@@ -99,7 +104,22 @@ if __name__ == "__main__":
     parser.add_argument("--seed", type=int, default=42,
                         help="Random seed for model head initialization, data shuffling and dropout. "
                              "Run with several seeds to measure cross-seed variance.")
+    parser.add_argument("--lr", type=float, default=None,
+                        help="Learning rate. Defaults to 2e-5. For deps this sets the encoder's rate; "
+                             "the parser layers keep 1e-3.")
+    parser.add_argument("--warmup_ratio", type=float, default=None,
+                        help="Fraction of training steps used to warm up the learning rate. "
+                             "Defaults to 0.1 for deps, 0 for other tasks.")
+    parser.add_argument("--weight_decay", type=float, default=None,
+                        help="Weight decay. Defaults to 0.")
+    parser.add_argument("--cv_folds", type=int, default=None,
+                        help="Number of cross-validation folds, for choosing hyperparameters. The model trains "
+                             "on all folds except --fold and is scored on --fold instead of the test set.")
+    parser.add_argument("--fold", type=int, default=None, help="Which fold to score on, from 0 to --cv_folds - 1.")
     args = parser.parse_args()
+    if (args.cv_folds is None) != (args.fold is None) or (args.cv_folds is not None
+                                                           and not 0 <= args.fold < args.cv_folds):
+        parser.error("--cv_folds and --fold go together, with 0 <= --fold < --cv_folds")
 
     """
     Add your custom arguments for IDE tests here
@@ -121,4 +141,7 @@ if __name__ == "__main__":
         args.epochs = 1 if modernbert else 3
 
     print(args)
+    if args.cv_folds is not None:
+        print(f"Cross-validation fold {args.fold}/{args.cv_folds}: the 'test' scores below are on held-out "
+              f"training data, not on the test set.")
     run(args)

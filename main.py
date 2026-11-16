@@ -17,7 +17,7 @@ import os
 import tempfile
 import numpy as np
 from sklearn.metrics import accuracy_score, confusion_matrix, f1_score
-from sklearn.model_selection import train_test_split
+from sklearn.model_selection import KFold, train_test_split
 import evaluate
 from utils import get_subset
 import torch
@@ -251,15 +251,39 @@ def load_jsonl_splits(paths):
     return {split: load_dataset("json", data_files=str(path), split="train") for split, path in paths.items()}
 
 
+def cv_fold_splits(raw, cv_folds, fold):
+    """Cross-validation for choosing hyperparameters: split the training data into `cv_folds` parts,
+    train on all parts except `fold`, and score on `fold` instead of the test set. The split is fixed
+    (random_state=42), so every learning rate and seed is compared on the same parts."""
+    folds = list(KFold(n_splits=cv_folds, shuffle=True, random_state=42).split(range(len(raw["train"]))))
+    train_idx, held_out_idx = folds[fold]
+    out = dict(raw, train=raw["train"].select(train_idx), test=raw["train"].select(held_out_idx))
+    if "validation" in out:
+        out["validation"] = None
+    return out
+
+
 class CantoFineTuningBase:
     """Lightweight base for fine-tuning tasks: only needs a tokenizer and the base model
     directory, unlike CantoPreTrainer, which also requires the Cantonese Wikipedia corpus."""
 
+    # Default training settings. run.py replaces them only when --lr, --warmup_ratio or --weight_decay is given
+    learning_rate = 2e-5
+    warmup_ratio = 0.0
+    weight_decay = 0.0
+
     def __init__(self, lang="yue", model_dir="./models/yue-monolingual", per_device_batch_size=64, seed=42,
-                 gradient_accumulation_steps=1):
+                 gradient_accumulation_steps=1, learning_rate=None, warmup_ratio=None, weight_decay=None,
+                 cv_folds=None, fold=None):
         self.lang = lang
+        self.cv_folds = cv_folds
+        self.fold = fold
         self.model_dir = model_dir
         self.seed = seed
+        for name, value in (("learning_rate", learning_rate), ("warmup_ratio", warmup_ratio),
+                            ("weight_decay", weight_decay)):
+            if value is not None:
+                setattr(self, name, value)
         # Default suits base-sized encoders; lower it for large models (e.g. 16 for ModernBERT-large)
         self.per_device_batch_size = per_device_batch_size
         # Raise together with lowering per_device_batch_size to keep the effective batch size
@@ -272,6 +296,9 @@ class CantoFineTuningBase:
             )
         self.tokenizer = AutoTokenizer.from_pretrained(self.model_dir,
             trust_remote_code=True,)
+
+    def apply_cv(self, raw):
+        return raw if self.cv_folds is None else cv_fold_splits(raw, self.cv_folds, self.fold)
 
 
 class CantoSequenceClassificationFineTuner(CantoFineTuningBase):
@@ -288,8 +315,8 @@ class CantoSequenceClassificationFineTuner(CantoFineTuningBase):
     max_length = 128
 
     def __init__(self, lang="yue", model_dir="./models/yue-monolingual", eval_only=False, per_device_batch_size=64,
-                 seed=42, gradient_accumulation_steps=1, num_train_epochs=None):
-        super().__init__(lang, model_dir, per_device_batch_size, seed, gradient_accumulation_steps)
+                 seed=42, gradient_accumulation_steps=1, num_train_epochs=None, **kwargs):
+        super().__init__(lang, model_dir, per_device_batch_size, seed, gradient_accumulation_steps, **kwargs)
         if num_train_epochs is not None:
             self.num_train_epochs = num_train_epochs
         self.label2id = {v: k for k, v in self.id2label.items()}
@@ -306,10 +333,11 @@ class CantoSequenceClassificationFineTuner(CantoFineTuningBase):
 
         self.training_args = TrainingArguments(
             output_dir=FINETUNE_OUTPUT_DIR,
-            overwrite_output_dir=True,
             num_train_epochs=self.num_train_epochs,
             optim="adamw_torch",
             learning_rate=self.learning_rate,
+            warmup_steps=self.warmup_ratio,  # in transformers v5, a value below 1 means a fraction of all steps
+            weight_decay=self.weight_decay,
             per_device_train_batch_size=self.per_device_batch_size,
             per_device_eval_batch_size=self.per_device_batch_size,
             gradient_accumulation_steps=self.gradient_accumulation_steps,
@@ -341,7 +369,7 @@ class CantoSequenceClassificationFineTuner(CantoFineTuningBase):
         return example
 
     def preprocess_data(self, eval_only=False):
-        raw = self.load_raw_splits(eval_only=eval_only)
+        raw = self.apply_cv(self.load_raw_splits(eval_only=eval_only))
 
         def tokenize(examples):
             args = [examples[field] for field in self.text_fields]
@@ -405,6 +433,39 @@ class CantoNLIFineTuner(CantoSequenceClassificationFineTuner):
         }
 
 
+class CantoXNLIFineTuner(CantoNLIFineTuner):
+    """Trained on yue-all-nli like the NLI task above, but tested on Cantonese translations of the XNLI
+    dev and test sets. XNLI has three labels; neutral and contradiction both count as not_entailment,
+    so the task stays binary."""
+    task_name = "xnli"
+    split_paths = {
+        "validation": "data/nli/xnli_yue/xnli_yue.dev.jsonl",
+        "test": "data/nli/xnli_yue/xnli_yue.test.jsonl",
+    }
+
+    def load_raw_splits(self, eval_only=False):
+        def to_binary(example):
+            return {"premise": example["yue_premise"], "hypothesis": example["yue_hypothesis"],
+                    "label": 0 if example["label"] == "entailment" else 1, "xnli_label": example["label"]}
+
+        raw = {split: ds.map(to_binary, remove_columns=ds.column_names)
+               for split, ds in load_jsonl_splits(self.split_paths).items()}
+        raw["train"] = None if eval_only else super().load_raw_splits()["train"]
+        return raw
+
+    def eval(self, trainer):
+        super().eval(trainer)
+        # Also report accuracy for each original XNLI label. Training data has no neutral pairs,
+        # so this shows how much of the error comes from neutral.
+        test = self.finetune_dataset["test"]
+        preds = trainer.predict(test).predictions
+        preds = (preds[0] if isinstance(preds, tuple) else preds).argmax(-1)
+        xnli_labels = np.array(test["xnli_label"])
+        for name in ("entailment", "neutral", "contradiction"):
+            gold = 0 if name == "entailment" else 1
+            print(f"Final xnli test accuracy on {name}: {np.mean(preds[xnli_labels == name] == gold)}")
+
+
 class CantoSentimentFineTuner(CantoSequenceClassificationFineTuner):
     task_name = "sentiment"
     text_fields = ("sentence",)
@@ -421,9 +482,9 @@ class CantoLangDetectFineTuner(CantoSequenceClassificationFineTuner):
     text_fields = ("sentence",)
     id2label = {0: "cantonese", 1: "mandarin", 2: "corrupted"}
     split_paths = {
-        "train": "data/ld/ld_train.jsonl",
-        "validation": "data/ld/ld_val.jsonl",
-        "test": "data/ld/ld_test.jsonl",
+        "train": "data/ld/lid_train.jsonl",
+        "validation": None,
+        "test": "data/ld/lid_test.jsonl",
     }
 
 
@@ -439,8 +500,8 @@ class CantoLAJFineTuner(CantoSequenceClassificationFineTuner):
 
 
 class CantoPOSFineTuner(CantoFineTuningBase):
-    def __init__(self, lang, model_dir, per_device_batch_size=64, seed=42, gradient_accumulation_steps=1):
-        super().__init__(lang, model_dir, per_device_batch_size, seed, gradient_accumulation_steps)
+    def __init__(self, lang, model_dir, per_device_batch_size=64, seed=42, gradient_accumulation_steps=1, **kwargs):
+        super().__init__(lang, model_dir, per_device_batch_size, seed, gradient_accumulation_steps, **kwargs)
         self.finetune_dataset = None
         # The 15 UPOS tags attested in UD_Cantonese-HK (SYM and X are unused):
         # https://universaldependencies.org/treebanks/yue_hk/index.html
@@ -451,10 +512,10 @@ class CantoPOSFineTuner(CantoFineTuningBase):
 
     def preprocess_data(self):
         # Expected format: {"train": [{"tokens": [...], "upos": [...]}], ...}
-        raw_data = load_jsonl_splits({
+        raw_data = self.apply_cv(load_jsonl_splits({
             "train": "data/pos/pos_train.jsonl",
             "test": "data/pos/pos_test.jsonl",
-        })
+        }))
 
         def align_labels_with_tokens(examples):
             tokenized = self.tokenizer(
@@ -509,9 +570,10 @@ class CantoPOSFineTuner(CantoFineTuningBase):
 
         training_args = TrainingArguments(
             output_dir=FINETUNE_OUTPUT_DIR,
-            overwrite_output_dir=True,
             num_train_epochs=20,
-            learning_rate=2e-5,
+            learning_rate=self.learning_rate,
+            warmup_steps=self.warmup_ratio,  # in transformers v5, a value below 1 means a fraction of all steps
+            weight_decay=self.weight_decay,
             per_device_train_batch_size=self.per_device_batch_size,
             per_device_eval_batch_size=self.per_device_batch_size,
             gradient_accumulation_steps=self.gradient_accumulation_steps,
@@ -551,7 +613,7 @@ class CantoPOSFineTuner(CantoFineTuningBase):
             args=training_args,
             train_dataset=self.finetune_dataset["train"],
             eval_dataset=self.finetune_dataset["test"],
-            tokenizer=self.tokenizer,
+            processing_class=self.tokenizer,
             compute_metrics=pos_compute_metrics,
         )
 
@@ -661,11 +723,12 @@ class EncoderForDependencyParsing(nn.Module):
 
 
 class CantoDEPSFineTuner(CantoFineTuningBase):
-    encoder_learning_rate = 2e-5
+    # learning_rate (2e-5 by default) is for the encoder; the parser layers use their own, higher rate
     parser_learning_rate = 1e-3
+    warmup_ratio = 0.1
 
-    def __init__(self, lang, model_dir, per_device_batch_size=64, seed=42, gradient_accumulation_steps=1):
-        super().__init__(lang, model_dir, per_device_batch_size, seed, gradient_accumulation_steps)
+    def __init__(self, lang, model_dir, per_device_batch_size=64, seed=42, gradient_accumulation_steps=1, **kwargs):
+        super().__init__(lang, model_dir, per_device_batch_size, seed, gradient_accumulation_steps, **kwargs)
         self.finetune_dataset = None
         self.max_length = 128
 
@@ -700,10 +763,10 @@ class CantoDEPSFineTuner(CantoFineTuningBase):
           - map head word index -> tokenized sequence index of that head's FIRST subword
           - map ROOT (0) -> [CLS] position index (usually 0)
         """
-        raw = load_jsonl_splits({
+        raw = self.apply_cv(load_jsonl_splits({
             "train": "data/deps/deps_train.jsonl",
             "test": "data/deps/deps_test.jsonl",
-        })
+        }))
 
         def align(examples):
             # Tokenize with word alignment
@@ -808,10 +871,9 @@ class CantoDEPSFineTuner(CantoFineTuningBase):
 
         args = TrainingArguments(
             output_dir=FINETUNE_OUTPUT_DIR,
-            overwrite_output_dir=True,
             num_train_epochs=30,
-            learning_rate=self.encoder_learning_rate,
-            warmup_ratio=0.1,
+            learning_rate=self.learning_rate,
+            warmup_steps=self.warmup_ratio,  # in transformers v5, a value below 1 means a fraction of all steps
             per_device_train_batch_size=self.per_device_batch_size,
             per_device_eval_batch_size=self.per_device_batch_size,
             gradient_accumulation_steps=self.gradient_accumulation_steps,
@@ -828,9 +890,9 @@ class CantoDEPSFineTuner(CantoFineTuningBase):
         encoder_params = [p for n, p in model.named_parameters() if n.startswith("encoder.")]
         parser_params = [p for n, p in model.named_parameters() if not n.startswith("encoder.")]
         optimizer = torch.optim.AdamW([
-            {"params": encoder_params, "lr": self.encoder_learning_rate},
+            {"params": encoder_params, "lr": self.learning_rate},
             {"params": parser_params, "lr": self.parser_learning_rate},
-        ], weight_decay=0.0)  # Trainer's own default; torch's AdamW would otherwise use 0.01
+        ], weight_decay=self.weight_decay)  # 0.0 by default, like Trainer; torch's AdamW alone would use 0.01
 
         def compute_deps_metrics(eval_pred):
             """
@@ -885,7 +947,7 @@ class CantoDEPSFineTuner(CantoFineTuningBase):
             args=args,
             train_dataset=self.finetune_dataset["train"],
             eval_dataset=self.finetune_dataset["test"],
-            tokenizer=self.tokenizer,
+            processing_class=self.tokenizer,
             compute_metrics=compute_deps_metrics,
             optimizers=(optimizer, None),
         )
